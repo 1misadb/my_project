@@ -1,0 +1,24 @@
+{
+  "name": "dxf-parser-app",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@jscad/dxf-deserializer": "^2.3.27",
+    "@jscad/svg-serializer": "^2.3.18",
+    "axios": "^1.10.0",
+    "cheerio": "^1.1.0",
+    "dxf-parser": "^1.1.2",
+    "express": "^5.1.0",
+    "multer": "^2.0.1",
+    "puppeteer": "^24.11.1",
+    "svgpath": "^2.6.0",
+    "svgson": "^5.3.1"
+  }
+}
