@@ -1,18 +1,30 @@
 const fs        = require('fs');
 const path      = require('path');
-const express   = require('express');
 const puppeteer = require('puppeteer');
 
 async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
-  const staticServer = express()
-    .use(express.static(path.join(__dirname, 'svgnest')))
-    .listen(0);
-  const url = `http://localhost:${staticServer.address().port}/index.html`;
-
   const browser = await puppeteer.launch({ headless: true });
   const page    = await browser.newPage();
   page.on('console', m => console.log('[svg-nest]', m.text()));
-  await page.goto(url, { waitUntil: 'networkidle0' });
+
+  await page.setContent('<html><body><div id="select"></div></body></html>');
+
+  const util = f => path.join(__dirname, 'svgnest', 'util', f);
+  const add  = f => page.addScriptTag({ path: f });
+
+  for (const f of [
+    util('pathsegpolyfill.js'),
+    util('matrix.js'),
+    util('domparser.js'),
+    util('clipper.js'),
+    util('parallel.js'),
+    util('geometryutil.js'),
+    util('placementworker.js'),
+    path.join(__dirname, 'svgnest', 'svgparser.js'),
+    path.join(__dirname, 'svgnest', 'svgnest.js'),
+  ]) {
+    await add(f);
+  }
 
   await page.addStyleTag({ content: `
     #select{width:100%!important;height:auto!important;margin-top:2em;}
@@ -20,57 +32,33 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
     html,body{margin:0;height:100%;}
   `});
 
-  const binText   = fs.readFileSync(binSvgPath , 'utf8');
-  const partsText = partSvgPaths.map(p => fs.readFileSync(p,'utf8'));
+  function stripOuterSvg(text){
+    const m = text.match(/<svg[^>]*>([\s\S]*?)<\/svg>/i);
+    return m ? m[1] : text;
+  }
 
-  await page.evaluate((binSVG, partsSVG) => {
+  const binContent = stripOuterSvg(fs.readFileSync(binSvgPath,'utf8'));
+  const partsContent = partSvgPaths.map(p => stripOuterSvg(fs.readFileSync(p,'utf8')));
+  const allSvg = `<svg xmlns="http://www.w3.org/2000/svg">${[binContent, ...partsContent].join('')}</svg>`;
+
+  await page.evaluate((svgString) => {
 
     const wrap = document.getElementById('select');
     wrap.innerHTML = '';
 
-    /* ---------- BIN ---------- */
-    const bin = window.SvgNest.parsesvg(binSVG);
-    bin.removeAttribute('width');
-    bin.removeAttribute('height');
+    const root = window.SvgNest.parsesvg(svgString);
+    wrap.appendChild(root);
 
-    if (!bin.hasAttribute('viewBox')) {
-      const w = parseFloat(bin.getAttribute('width'))  || 3000;
-      const h = parseFloat(bin.getAttribute('height')) || 1500;
-      bin.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    const bin = root.firstElementChild;
+    if (bin) {
+      window.SvgNest.setbin(bin);
+      const bb = bin.getBBox();
+      console.log('✅ BIN bbox:', bb.width.toFixed(1), '×', bb.height.toFixed(1));
     }
 
-    wrap.appendChild(bin);
-    window.SvgNest.setbin(bin);
-
-    console.log('✅ BIN bbox:',
-                bin.viewBox.baseVal.width,
-                '×',
-                bin.viewBox.baseVal.height);
-
-    /* ---------- DETAILS ---------- */
-    partsSVG.forEach(txt => {
-      const svgElem = window.SvgNest.parsesvg(txt);
-      svgElem.removeAttribute('width');
-      svgElem.removeAttribute('height');
-
-      // DEBUG
-      console.log('🛠 svgElem.outerHTML:', svgElem.outerHTML);
-
-      /* кладём во временный DOM, чтобы getBBox работал */
-      svgElem.style.visibility = 'hidden';
-      wrap.appendChild(svgElem);
-
-      svgElem.querySelectorAll('path').forEach(path => {
-        const bb = path.getBBox();
-
-        console.log('   ➜ detail bbox:',
-                    bb.width.toFixed(1),'×',bb.height.toFixed(1));
-
-        const g = document.createElementNS(path.namespaceURI,'g');
-        g.setAttribute('class','nestable');
-        g.appendChild(path);         // path внутрь g
-        svgElem.appendChild(g);      // g остался в svgElem
-      });
+    root.querySelectorAll('path').forEach(p => {
+      const bb = p.getBBox();
+      console.log('   ➜ detail bbox:', bb.width.toFixed(1), '×', bb.height.toFixed(1));
     });
 
     window.SvgNest.config({
@@ -82,7 +70,7 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
       useHoles:       true
     });
 
-  }, binText, partsText);
+  }, allSvg);
 
   /* --- старт поиска раскладки --- */
   await page.evaluate(() => {
@@ -92,17 +80,17 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
     let iterations = 0;
     window.finished = false;
 
-    const origRender = window.SvgNest.renderSvg;
-    window.SvgNest.renderSvg = (...args) => {
+    const target = document.getElementById('select');
+    window.SvgNest.start(() => {}, svglist => {
       iterations++;
       if (iterations % 10 === 0)
         console.log(`🔁 Iteration ${iterations}`);
-      origRender(...args);
+      if (svglist && svglist.length) {
+        target.innerHTML = '';
+        svglist.forEach(s => target.appendChild(s));
+      }
       if (iterations >= TARGET_ITER) window.finished = true;
-    };
-
-    document.querySelector('#start').classList.remove('disabled');
-    document.querySelector('#start').click();
+    });
 
     setTimeout(() => {
       console.log(`⏰ Timeout after ${iterations} iterations`);
@@ -110,7 +98,7 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
     }, T_MAX_MS);
   });
 
-  await page.waitForFunction('window.finished === true', { timeout: 12_000 });
+  await page.waitForFunction('window.finished === true', { timeout: 120_000 });
 
   const inner = await page.evaluate(() =>
     document.getElementById('select').innerHTML
@@ -123,7 +111,6 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
   console.log('✅ nested SVG saved →', outputSvg);
 
   await browser.close();
-  staticServer.close();
 }
 
 module.exports = { runNesting };
