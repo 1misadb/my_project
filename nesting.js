@@ -32,9 +32,14 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
     html,body{margin:0;height:100%;}
   `});
 
-  const binText   = fs.readFileSync(binSvgPath , 'utf8');
-  const partsText = partSvgPaths.map(p => fs.readFileSync(p,'utf8'));
-  const allSvg    = `<svg xmlns="http://www.w3.org/2000/svg">${[binText, ...partsText].join('')}</svg>`;
+  function stripOuterSvg(text){
+    const m = text.match(/<svg[^>]*>([\s\S]*?)<\/svg>/i);
+    return m ? m[1] : text;
+  }
+
+  const binContent = stripOuterSvg(fs.readFileSync(binSvgPath,'utf8'));
+  const partsContent = partSvgPaths.map(p => stripOuterSvg(fs.readFileSync(p,'utf8')));
+  const allSvg = `<svg xmlns="http://www.w3.org/2000/svg">${[binContent, ...partsContent].join('')}</svg>`;
 
   await page.evaluate((svgString) => {
 
@@ -46,15 +51,9 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
 
     const bin = root.firstElementChild;
     if (bin) {
-      bin.removeAttribute('width');
-      bin.removeAttribute('height');
-      if (!bin.hasAttribute('viewBox')) {
-        const w = parseFloat(bin.getAttribute('width')) || 3000;
-        const h = parseFloat(bin.getAttribute('height')) || 1500;
-        bin.setAttribute('viewBox', `0 0 ${w} ${h}`);
-      }
       window.SvgNest.setbin(bin);
-      console.log('✅ BIN bbox:', bin.viewBox.baseVal.width, '×', bin.viewBox.baseVal.height);
+      const bb = bin.getBBox();
+      console.log('✅ BIN bbox:', bb.width.toFixed(1), '×', bb.height.toFixed(1));
     }
 
     root.querySelectorAll('path').forEach(p => {
