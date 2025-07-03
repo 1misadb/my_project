@@ -34,55 +34,32 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
 
   const binText   = fs.readFileSync(binSvgPath , 'utf8');
   const partsText = partSvgPaths.map(p => fs.readFileSync(p,'utf8'));
+  const allSvg    = `<svg xmlns="http://www.w3.org/2000/svg">${[binText, ...partsText].join('')}</svg>`;
 
-  await page.evaluate((binSVG, partsSVG) => {
+  await page.evaluate((svgString) => {
 
     const wrap = document.getElementById('select');
     wrap.innerHTML = '';
 
-    /* ---------- BIN ---------- */
-    const bin = window.SvgNest.parsesvg(binSVG);
-    bin.removeAttribute('width');
-    bin.removeAttribute('height');
+    const root = window.SvgNest.parsesvg(svgString);
+    wrap.appendChild(root);
 
-    if (!bin.hasAttribute('viewBox')) {
-      const w = parseFloat(bin.getAttribute('width'))  || 3000;
-      const h = parseFloat(bin.getAttribute('height')) || 1500;
-      bin.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    const bin = root.firstElementChild;
+    if (bin) {
+      bin.removeAttribute('width');
+      bin.removeAttribute('height');
+      if (!bin.hasAttribute('viewBox')) {
+        const w = parseFloat(bin.getAttribute('width')) || 3000;
+        const h = parseFloat(bin.getAttribute('height')) || 1500;
+        bin.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      }
+      window.SvgNest.setbin(bin);
+      console.log('✅ BIN bbox:', bin.viewBox.baseVal.width, '×', bin.viewBox.baseVal.height);
     }
 
-    wrap.appendChild(bin);
-    window.SvgNest.setbin(bin);
-
-    console.log('✅ BIN bbox:',
-                bin.viewBox.baseVal.width,
-                '×',
-                bin.viewBox.baseVal.height);
-
-    /* ---------- DETAILS ---------- */
-    partsSVG.forEach(txt => {
-      const svgElem = window.SvgNest.parsesvg(txt);
-      svgElem.removeAttribute('width');
-      svgElem.removeAttribute('height');
-
-      // DEBUG
-      console.log('🛠 svgElem.outerHTML:', svgElem.outerHTML);
-
-      /* кладём во временный DOM, чтобы getBBox работал */
-      svgElem.style.visibility = 'hidden';
-      wrap.appendChild(svgElem);
-
-      svgElem.querySelectorAll('path').forEach(path => {
-        const bb = path.getBBox();
-
-        console.log('   ➜ detail bbox:',
-                    bb.width.toFixed(1),'×',bb.height.toFixed(1));
-
-        const g = document.createElementNS(path.namespaceURI,'g');
-        g.setAttribute('class','nestable');
-        g.appendChild(path);         // path внутрь g
-        svgElem.appendChild(g);      // g остался в svgElem
-      });
+    root.querySelectorAll('path').forEach(p => {
+      const bb = p.getBBox();
+      console.log('   ➜ detail bbox:', bb.width.toFixed(1), '×', bb.height.toFixed(1));
     });
 
     window.SvgNest.config({
@@ -94,7 +71,7 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
       useHoles:       true
     });
 
-  }, binText, partsText);
+  }, allSvg);
 
   /* --- старт поиска раскладки --- */
   await page.evaluate(() => {
