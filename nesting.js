@@ -3,7 +3,19 @@ const path      = require('path');
 const puppeteer = require('puppeteer');
 
 async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
-  const browser = await puppeteer.launch({ headless: true });
+  let browser;
+  try {
+    browser = await puppeteer.launch({
+    headless: 'new',
+    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--single-process", "--disable-gpu"]
+  });
+
+  const page    = await browser.newPage();
+  } catch (err) {
+    console.error("Failed to launch browser:", err);
+    return;
+  }
   const page    = await browser.newPage();
   page.on('console', m => console.log('[svg-nest]', m.text()));
 
@@ -42,12 +54,21 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
   const allSvg = `<svg xmlns="http://www.w3.org/2000/svg">${[binContent, ...partsContent].join('')}</svg>`;
 
   await page.evaluate((svgString) => {
-
     const wrap = document.getElementById('select');
     wrap.innerHTML = '';
 
     const root = window.SvgNest.parsesvg(svgString);
     wrap.appendChild(root);
+
+    root.querySelectorAll('path').forEach(p => {
+      const bb = p.getBBox();
+      if (bb.width === 0 || bb.height === 0) {
+        console.log('⚠️ Ignoring path with zero dimension');
+        p.remove();
+      } else {
+        console.log('   ➜ detail bbox:', bb.width.toFixed(1), '×', bb.height.toFixed(1));
+      }
+    });
 
     const bin = root.firstElementChild;
     if (bin) {
@@ -55,11 +76,6 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
       const bb = bin.getBBox();
       console.log('✅ BIN bbox:', bb.width.toFixed(1), '×', bb.height.toFixed(1));
     }
-
-    root.querySelectorAll('path').forEach(p => {
-      const bb = p.getBBox();
-      console.log('   ➜ detail bbox:', bb.width.toFixed(1), '×', bb.height.toFixed(1));
-    });
 
     window.SvgNest.config({
       spacing:         2,
@@ -71,6 +87,7 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
     });
 
   }, allSvg);
+
 
   /* --- старт поиска раскладки --- */
   await page.evaluate(() => {
