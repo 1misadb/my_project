@@ -135,9 +135,12 @@ def convert(infile, outfile, sf=None):
             if t=='LINE':
                 s,e1=e.dxf.start,e.dxf.end
                 dwg.add(dwg.line((s.x*sf,-s.y*sf),(e1.x*sf,-e1.y*sf),stroke='black'))
-            elif t=='CIRCLE':
+            elif t == 'CIRCLE':
                 c,r=e.dxf.center,e.dxf.radius*sf
-                dwg.add(dwg.circle((c.x*sf,-c.y*sf),r,stroke='black',fill='none'))
+                d = f"M {c.x*sf+r} {-c.y*sf} " \
+                    f"A {r} {r} 0 1 0 {c.x*sf-r} {-c.y*sf} " \
+                    f"A {r} {r} 0 1 0 {c.x*sf+r} {-c.y*sf} Z"
+                dwg.add(dwg.path(d=d, stroke='black', fill='none'))
             elif t=='ARC':
                 c,r=e.dxf.center,e.dxf.radius*sf
                 sa,ea=map(math.radians,(e.dxf.start_angle,e.dxf.end_angle))

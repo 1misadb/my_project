@@ -3,5 +3,5 @@
      viewBox="0 0 3000 1500"
      version="1.1">
   <!-- ВАЖНО: polygon задаёт контур листа -->
-  <polygon points="0,0 3000,0 3000,1500 0,1500" fill="none" stroke="black" stroke-width="2"/>
+  <polygon points="0,0 3000,0 3000,1500 0,1500 0,0" fill="none" stroke="black" stroke-width="2"/>
 </svg>

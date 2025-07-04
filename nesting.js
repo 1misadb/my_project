@@ -1,148 +1,149 @@
-#!/usr/bin/env node
-
-const express = require('express');
-const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-const { spawnSync, execSync } = require('child_process');
-const cheerio = require('cheerio');
-const svgpath = require('svgpath');
-const { runNesting } = require('./nesting');
-const { deserialize } = require('@jscad/dxf-deserializer');
-const { serialize } = require('@jscad/svg-serializer');
+const { pathToFileURL } = require('url');
+const puppeteer = require('puppeteer');
 
-/* ==== dxf2svg helper using dxf2svg_ezdxf.py ========================= */
-function dxf2svgPy(input, output) {
-  const py = spawnSync('python', ['dxf2svg_ezdxf.py', input, output], { encoding: 'utf8', stdio: 'inherit' });
-  if (py.error || py.status !== 0 || !fs.existsSync(output))
-    throw new Error('dxf2svg_ezdxf.py failed for ' + input);
-}
-
-/* ==== Center SVG after conversion ==================================== */
-function centerSvgFile(filePath) {
-  const content = fs.readFileSync(filePath, 'utf8');
-  const $ = cheerio.load(content, { xmlMode: true });
-
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-
-  $('path').each((i, el) => {
-    const d = $(el).attr('d');
-    if (!d) return;
-    const sp = svgpath(d).abs();
-    sp.segments.forEach(seg => {
-      for (let i = 1; i < seg.length; i += 2) {
-        const x = seg[i], y = seg[i + 1];
-        if (typeof x !== 'number' || typeof y !== 'number') continue;
-        if (x < minX) minX = x;
-        if (y < minY) minY = y;
-        if (x > maxX) maxX = x;
-        if (y > maxY) maxY = y;
-      }
-    });
-  });
-
-  if (minX === Infinity || minY === Infinity) {
-    console.warn('❌ No valid path data found in SVG.');
-    return;
-  }
-
-  const shiftX = -minX, shiftY = -minY;
-
-  $('path').each((i, el) => {
-    const d = $(el).attr('d');
-    if (!d) return;
-    $(el).attr('d', svgpath(d).translate(shiftX, shiftY).toString());
-  });
-
-  $('svg').attr('viewBox', `0 0 ${maxX - minX} ${maxY - minY}`);
-  fs.writeFileSync(filePath, $.xml());
-  console.log(`✅ Centered SVG saved: ${filePath}`);
-}
-
-/* ==== Multer setup ================================================== */
-const storage = multer.diskStorage({
-  destination: 'uploads/',
-  filename: (_, __, cb) => cb(null, `${Date.now()}_${Math.random().toString(16).slice(2)}.dxf`)
-});
-const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
-
-const app = express();
-const port = 3001;
-
-/* ==== Disable cache ================================================= */
-app.use((req, res, next) => {
-  res.setHeader('Cache-Control', 'no-store');
-  next();
-});
-
-/* ==== /convert-only ================================================= */
-app.post('/convert-only', upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).send('No file uploaded.');
-
-  const dxf = req.file.path;
-  const svg = dxf.replace(/\.dxf$/i, '.svg');
+async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
+  let browser;
 
   try {
-    dxf2svgPy(dxf, svg);
-    centerSvgFile(svg);
-  } catch (err) {
-    console.error(err.message);
-    return res.status(500).send('DXF → SVG failed');
-  }
+    console.log('🏁 Starting SVG nesting...');
+    browser = await puppeteer.launch({
+      headless: true, // Используй false для диагностики в окне
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--allow-file-access-from-files',
+        '--disable-web-security',
+        '--disable-features=site-per-process', // важно для file://
+        '--disable-features=IsolateOrigins',
+      ],
+    });
 
-  res.download(svg, 'converted.svg', err => {
-    if (err) console.error('Download error:', err);
-    [dxf, svg].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
-  });
-});
+    const page = await browser.newPage();
+    page.on('console', m => console.log('[svg-nest]', m.text()));
+    page.on('pageerror', err => console.error('[svg-nest] [pageerror]', err));
 
-/* ==== Global Error Handler ========================================== */
-app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError)
-    return res.status(400).send(err.message);
-  if (err) return res.status(400).send(err.message);
-  next();
-});
+    const indexHtmlUrl = pathToFileURL(path.join(__dirname, 'svgnest', 'index.html')).href;
+    console.log('🔗 Loading index.html from:', indexHtmlUrl);
 
-/* ==== Startup: Convert DXF -> SVG, Shift, Nest ====================== */
-app.listen(port, async () => {
-  console.log(`DXF parser server running at http://localhost:${port}`);
+    await page.goto(indexHtmlUrl, { waitUntil: 'load' });
+    console.log('[svg-nest] ✅ index.html loaded successfully');
 
-  const convertedDir = path.join(__dirname, 'converted');
-  const bin = path.join(__dirname, 'bin.svg');
-  const outSvg = path.join(__dirname, 'nested-output.svg');
+    // Проверка доступности SvgNest
+    await page.waitForFunction(() => typeof window.SvgNest !== 'undefined', { timeout: 10_000 });
+    console.log('[svg-nest] ✅ SvgNest loaded in page context');
 
-  if (!fs.existsSync(convertedDir)) {
-    console.log('⚠️ Folder "converted" does not exist.');
-    return;
-  }
+    // Очищаем body и удаляем favicon
+    await page.evaluate(() => {
+      document.body.innerHTML = '<div id="select"></div>';
+      const favicons = document.querySelectorAll('link[rel~="icon"]');
+      favicons.forEach(f => f.remove());
+    });
 
-  const files = fs.readdirSync(convertedDir).filter(f => f.endsWith('.dxf'));
-  console.log(`\n📏 Converting ${files.length} DXF files to SVG:`);
+    // Добавляем стили
+    await page.addStyleTag({
+      content: `
+        #select { width:100%!important; height:auto!important; margin-top:2em; }
+        #select svg { position:static!important; width:100%!important; height:auto!important; }
+        html,body { margin:0; height:100%; }
+      `,
+    });
 
-  const svgFiles = [];
-
-  for (const f of files) {
-    const dxfPath = path.join(convertedDir, f);
-    const svgPath = dxfPath.replace(/\.dxf$/i, '.svg');
-    try {
-      dxf2svgPy(dxfPath, svgPath);
-      svgFiles.push(svgPath);
-    } catch (err) {
-      console.error(`❌ Failed to convert ${f}: ${err.message}`);
+    // Чтение и подготовка SVG строк
+    function stripOuterSvg(text) {
+      const m = text.match(/<svg[^>]*>([\s\S]*?)<\/svg>/i);
+      return m ? m[1] : text;
     }
+
+    const binContent = stripOuterSvg(fs.readFileSync(binSvgPath, 'utf8'));
+    const partsContent = partSvgPaths.map(p => stripOuterSvg(fs.readFileSync(p, 'utf8')));
+    const allSvg = `<svg xmlns="http://www.w3.org/2000/svg">${[binContent, ...partsContent].join('')}</svg>`;
+
+    console.log('[svg-nest] SVG string length:', allSvg.length);
+
+    // Передача SVG в браузерный контекст
+    await page.evaluate((svgString) => {
+      console.log('[svg-nest] 📝 evaluate entered');
+
+      if (!window.SvgNest) throw new Error('SvgNest not found');
+
+      const wrap = document.getElementById('select');
+      if (!wrap) throw new Error('#select div not found');
+
+      console.log('[svg-nest] ✅ DOM ready, parsing SVG');
+      const root = window.SvgNest.parsesvg(svgString);
+      if (!root) throw new Error('parsed root is null');
+
+      wrap.innerHTML = '';
+      wrap.appendChild(root);
+      console.log('[svg-nest] ✅ SVG appended to DOM');
+
+      const bin = root.firstElementChild;
+      if (!bin) throw new Error('Bin not found');
+
+      window.SvgNest.setbin(bin);
+      console.log('[svg-nest] ✅ Bin set');
+
+      // ✅ Минимальный spacing здесь
+      window.SvgNest.config({
+        spacing: 2, 
+        rotations: 36,
+        populationSize: 50,
+        mutationRate: 45,
+        exploreConcave: true,
+        useHoles: true
+      });
+
+      console.log('[svg-nest] ✅ SvgNest configured');
+    }, allSvg);
+
+    // Запуск раскладки
+    await page.evaluate(() => {
+      console.log('[svg-nest] 🚀 Starting nesting algorithm');
+
+      const TARGET_ITER = 360;
+      const T_MAX_MS = 90_000;
+
+      let iterations = 0;
+      window.finished = false;
+
+      const target = document.getElementById('select');
+      window.SvgNest.start(() => {}, svglist => {
+        iterations++;
+        if (iterations % 10 === 0) console.log(`🔁 Iteration ${iterations}`);
+
+        if (svglist && svglist.length) {
+          target.innerHTML = '';
+          svglist.forEach(s => target.appendChild(s));
+        }
+
+        if (iterations >= TARGET_ITER) window.finished = true;
+      });
+
+      setTimeout(() => {
+        console.log(`⏰ Timeout after ${iterations} iterations`);
+        window.finished = true;
+      }, T_MAX_MS);
+    });
+
+    await page.waitForFunction('window.finished === true', { timeout: 120_000 });
+    console.log('[svg-nest] ✅ Nesting finished');
+
+    // Сохраняем результат
+    const inner = await page.evaluate(() => document.getElementById('select').innerHTML);
+
+    fs.writeFileSync(outputSvg, `<svg xmlns="http://www.w3.org/2000/svg">${inner}</svg>`);
+    console.log('✅ nested SVG saved →', outputSvg);
+
+  } catch (err) {
+    console.error('[svg-nest] ❌ Fatal error:', err);
+  } finally {
+    if (browser) await browser.close();
+    console.log('👋 Browser closed');
   }
+}
 
-  console.log(`\n🔧 Shifting ${svgFiles.length} SVG files:`);
-
-  const shiftedFiles = svgFiles.map(s => {
-    const out = s.replace(/\.svg$/, '_shift.svg');
-    console.log(`⚙️ Shifting bbox: ${path.basename(s)}`);
-    execSync(`python shift_svg_bbox.py "${s}" "${out}"`, { stdio: 'inherit' });
-    return out;
-  });
-
-  console.log('\n🚀 Running SVG nesting...');
-  await runNesting(bin, shiftedFiles, outSvg);
-  console.log(`✅ Nesting finished. Output saved to ${outSvg}`);
-});
+module.exports = { runNesting };
