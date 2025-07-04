@@ -89,12 +89,13 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
 
       // ✅ Минимальный spacing здесь
       window.SvgNest.config({
-        spacing: 2, 
+        spacing: 5, 
         rotations: 36,
         populationSize: 50,
         mutationRate: 45,
         exploreConcave: true,
-        useHoles: true
+        useHoles: true,
+        curveTolerance: 0.05
       });
 
       console.log('[svg-nest] ✅ SvgNest configured');
