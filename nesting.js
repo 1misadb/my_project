@@ -6,37 +6,33 @@ async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
   let browser;
   try {
     browser = await puppeteer.launch({
-    headless: 'new',
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--single-process", "--disable-gpu"]
-  });
-
-  const page    = await browser.newPage();
+      headless: 'new',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--single-process',
+        '--disable-gpu',
+        '--allow-file-access-from-files',
+        '--disable-web-security',
+      ],
+    });
   } catch (err) {
-    console.error("Failed to launch browser:", err);
+    console.error('Failed to launch browser:', err);
     return;
   }
-  const page    = await browser.newPage();
+
+  const page = await browser.newPage();
   page.on('console', m => console.log('[svg-nest]', m.text()));
+  page.on('pageerror', err => console.error('[pageerror]', err));
 
-  await page.setContent('<html><body><div id="select"></div></body></html>');
+  const basePath = 'file://' + path.join(__dirname, 'svgnest') + '/';
+  await page.goto(basePath + 'index.html');
+  await page.evaluate(() => {
+    document.body.innerHTML = '<div id="select"></div>';
+  });
 
-  const util = f => path.join(__dirname, 'svgnest', 'util', f);
-  const add  = f => page.addScriptTag({ path: f });
-
-  for (const f of [
-    util('pathsegpolyfill.js'),
-    util('matrix.js'),
-    util('domparser.js'),
-    util('clipper.js'),
-    util('parallel.js'),
-    util('geometryutil.js'),
-    util('placementworker.js'),
-    path.join(__dirname, 'svgnest', 'svgparser.js'),
-    path.join(__dirname, 'svgnest', 'svgnest.js'),
-  ]) {
-    await add(f);
-  }
+  // scripts are loaded by svgnest/index.html
 
   await page.addStyleTag({ content: `
     #select{width:100%!important;height:auto!important;margin-top:2em;}
