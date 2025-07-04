@@ -28,13 +28,22 @@ def main(fname):
             length += 2*math.pi*e.dxf.radius
             holes  += 1
 
-        elif t in ('LWPOLYLINE', 'POLYLINE'):
+        elif t == 'LWPOLYLINE':
             pts = list(e.get_points())
             for i in range(len(pts)-1):
                 length += dist(pts[i], pts[i+1])
             if e.closed:
                 length += dist(pts[-1], pts[0])
             holes += 1
+
+        elif t == 'POLYLINE':
+            pts = [ (v.dxf.location.x, v.dxf.location.y) for v in e.vertices ]
+            for i in range(len(pts)-1):
+                length += dist(pts[i], pts[i+1])
+            if e.is_closed:
+                length += dist(pts[-1], pts[0])
+            holes += 1
+
 
         elif t == 'SPLINE':
             try:
