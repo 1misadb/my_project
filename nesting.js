@@ -14,20 +14,70 @@ function escapeReg(text) {
 
 function makeUnique(svg, idx) {
   const foundIds = [];
+  const foundClasses = [];
+  
+  // Найти id
   let out = svg.replace(/id="([^"]+)"/g, (_, id) => {
     foundIds.push(id);
     return `id="${id}_${idx}"`;
   });
 
+  // Найти классы
+  out = out.replace(/class="([^"]+)"/g, (_, classes) => {
+    const clsArray = classes.split(/\s+/);
+    clsArray.forEach(cls => foundClasses.push(cls));
+    return `class="${clsArray.map(c => `${c}_${idx}`).join(' ')}"`;
+  });
+
+  // Заменить все найденные id
   for (const id of foundIds) {
     const safe = escapeReg(id);
     const target = `${id}_${idx}`;
-    out = out.replace(new RegExp(`url\\(#${safe}\\)`, 'g'), `url(#${target})`);
-    out = out.replace(new RegExp(`href="#${safe}"`, 'g'), `href="#${target}"`);
-    out = out.replace(new RegExp(`xlink:href="#${safe}"`, 'g'), `xlink:href="#${target}"`);
+
+    const replacements = [
+      [`url\\(#${safe}\\)`, `url(#${target})`],
+      [`href="#${safe}"`, `href="#${target}"`],
+      [`xlink:href="#${safe}"`, `xlink:href="#${target}"`],
+      [`#${safe}\\b`, `#${target}`],
+      [`begin="${safe}\\.`, `begin="${target}.`],
+      [`from="#${safe}"`, `from="#${target}"`],
+      [`to="#${safe}"`, `to="#${target}"`],
+      [`by="#${safe}"`, `by="#${target}"`],
+      [`filter="url\\(#${safe}\\)"`, `filter="url(#${target})"`],
+      [`mask="url\\(#${safe}\\)"`, `mask="url(#${target})"`],
+      [`clip-path="url\\(#${safe}\\)"`, `clip-path="url(#${target})"`],
+      [`marker-start="url\\(#${safe}\\)"`, `marker-start="url(#${target})"`],
+      [`marker-mid="url\\(#${safe}\\)"`, `marker-mid="url(#${target})"`],
+      [`marker-end="url\\(#${safe}\\)"`, `marker-end="url(#${target})"`],
+      [`fill="url\\(#${safe}\\)([^"]*)"`, `fill="url(#${target})$1"`],
+      [`stroke="url\\(#${safe}\\)([^"]*)"`, `stroke="url(#${target})$1"`],
+      [`aria-labelledby="${safe}"`, `aria-labelledby="${target}"`],
+      [`aria-describedby="${safe}"`, `aria-describedby="${target}"`],
+    ];
+
+    for (const [pattern, replaceWith] of replacements) {
+      out = out.replace(new RegExp(pattern, 'g'), replaceWith);
+    }
+
+    // Заменить в <style>
+    out = out.replace(/<style[^>]*>([\s\S]*?)<\/style>/g, (match, css) => {
+      let updatedCss = css.replace(new RegExp(`#${safe}\\b`, 'g'), `#${target}`);
+      updatedCss = updatedCss.replace(new RegExp(`url\\(#${safe}\\)`, 'g'), `url(#${target})`);
+      return `<style>${updatedCss}</style>`;
+    });
   }
+
+  // Заменить классы в <style>
+  for (const id of foundIds) {
+    const safe = escapeReg(id);
+    const target = `${id}_${idx}`;
+    out = out.replace(new RegExp(`style="([^"]*?)url\\(#${safe}\\)([^"]*?)"`, 'g'),
+      (_, pre, post) => `style="${pre}url(#${target})${post}"`);
+  }
+
   return out;
 }
+
 
 async function runNesting(binSvgPath, partSvgArray, outputSvg, multiplyCounts) {
   let browser;
@@ -81,6 +131,7 @@ async function runNesting(binSvgPath, partSvgArray, outputSvg, multiplyCounts) {
       }
     }
 
+
     const allSvg = `<svg xmlns="http://www.w3.org/2000/svg">${binContent}${partsContent.join('')}</svg>`;
     console.log('[svg-nest] SVG string length:', allSvg.length);
 
@@ -106,11 +157,11 @@ async function runNesting(binSvgPath, partSvgArray, outputSvg, multiplyCounts) {
       window.SvgNest.config({
         spacing: 5,
         rotations: 8,
-        populationSize: 2,
-        mutationRate: 15,
+        populationSize: 50,
+        mutationRate: 45,
         exploreConcave: true,
         useHoles: true,
-        curveTolerance: 0.00999
+        curveTolerance: 0.009999
       });
 
       console.log('[svg-nest] ✅ SvgNest configured');
@@ -119,7 +170,7 @@ async function runNesting(binSvgPath, partSvgArray, outputSvg, multiplyCounts) {
     // Start nesting
     await page.evaluate(() => {
       console.log('[svg-nest] 🚀 Starting nesting algorithm');
-      const TARGET_ITER = 20;
+      const TARGET_ITER = 50;
       const T_MAX_MS = 300000;
       let iterations = 0;
       window.finished = false;
