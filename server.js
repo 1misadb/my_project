@@ -1,38 +1,21 @@
 #!/usr/bin/env node
-/*  REST-API: DXF → ( JSCAD | dxf2svg | Inkscape ) → SVG → SVG-Nest */
 
-const express        = require('express');
-const multer         = require('multer');
-const fs             = require('fs');
-const path           = require('path');
-const { spawnSync }  = require('child_process');
-const axios          = require('axios');
-const cheerio        = require('cheerio');
-const svgpath        = require('svgpath');
-
-const { runNesting }  = require('./nesting');
+const express = require('express');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+const { spawnSync, execSync } = require('child_process');
+const cheerio = require('cheerio');
+const svgpath = require('svgpath');
+const { runNesting } = require('./nesting');
 const { deserialize } = require('@jscad/dxf-deserializer');
-const { serialize }   = require('@jscad/svg-serializer');
+const { serialize } = require('@jscad/svg-serializer');
 
-/* ==== dxf2svg helper + fallback to Inkscape ========================= */
+/* ==== dxf2svg helper using dxf2svg_ezdxf.py ========================= */
 function dxf2svgPy(input, output) {
-  const dir = path.dirname(output);
-  const inName = path.basename(input);
-  const produced = path.join(dir, inName.replace(/\.dxf$/i, '.svg'));
-
-  [output, produced].forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
-
-  let r = spawnSync('python', ['-m', 'dxf2svg', inName], { cwd: dir, stdio: 'inherit' });
-
-  if (!fs.existsSync(produced)) {
-    console.warn('dxf2svg did not produce output. Trying Inkscape fallback...');
-    const ink = spawnSync('inkscape', [inName, '--export-type=svg', '--export-filename', produced], { cwd: dir, stdio: 'inherit' });
-    if (ink.error || ink.status) throw new Error('Inkscape DXF → SVG failed');
-  }
-
-  if (!fs.existsSync(produced)) throw new Error('No SVG produced by dxf2svg or Inkscape');
-
-  if (produced !== output) fs.renameSync(produced, output);
+  const py = spawnSync('python', ['dxf2svg_ezdxf.py', input, output], { encoding: 'utf8', stdio: 'inherit' });
+  if (py.error || py.status !== 0 || !fs.existsSync(output))
+    throw new Error('dxf2svg_ezdxf.py failed for ' + input);
 }
 
 /* ==== Center SVG after conversion ==================================== */
@@ -40,20 +23,15 @@ function centerSvgFile(filePath) {
   const content = fs.readFileSync(filePath, 'utf8');
   const $ = cheerio.load(content, { xmlMode: true });
 
-  let minX = Infinity, minY = Infinity;
-  let maxX = -Infinity, maxY = -Infinity;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
   $('path').each((i, el) => {
     const d = $(el).attr('d');
     if (!d) return;
-
-    const sp = svgpath(d);
-    const segments = sp.segments;
-
-    segments.forEach(seg => {
+    const sp = svgpath(d).abs();
+    sp.segments.forEach(seg => {
       for (let i = 1; i < seg.length; i += 2) {
-        const x = seg[i];
-        const y = seg[i + 1];
+        const x = seg[i], y = seg[i + 1];
         if (typeof x !== 'number' || typeof y !== 'number') continue;
         if (x < minX) minX = x;
         if (y < minY) minY = y;
@@ -68,20 +46,15 @@ function centerSvgFile(filePath) {
     return;
   }
 
-  const shiftX = -minX;
-  const shiftY = -minY;
+  const shiftX = -minX, shiftY = -minY;
 
   $('path').each((i, el) => {
     const d = $(el).attr('d');
     if (!d) return;
-    const transformed = svgpath(d).translate(shiftX, shiftY).toString();
-    $(el).attr('d', transformed);
+    $(el).attr('d', svgpath(d).translate(shiftX, shiftY).toString());
   });
 
-  const width = maxX - minX;
-  const height = maxY - minY;
-  $('svg').attr('viewBox', `0 0 ${width} ${height}`);
-
+  $('svg').attr('viewBox', `0 0 ${maxX - minX} ${maxY - minY}`);
   fs.writeFileSync(filePath, $.xml());
   console.log(`✅ Centered SVG saved: ${filePath}`);
 }
@@ -89,8 +62,7 @@ function centerSvgFile(filePath) {
 /* ==== Multer setup ================================================== */
 const storage = multer.diskStorage({
   destination: 'uploads/',
-  filename: (_, __, cb) =>
-    cb(null, `${Date.now()}_${Math.random().toString(16).slice(2)}.dxf`)
+  filename: (_, __, cb) => cb(null, `${Date.now()}_${Math.random().toString(16).slice(2)}.dxf`)
 });
 const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
 
@@ -103,69 +75,6 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ==== /nest ========================================================= */
-app.post('/nest', upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).send('No file uploaded.');
-
-  const dxf    = req.file.path;
-  const svg    = dxf.replace(/\.dxf$/i, '.svg');
-  const nested = svg.replace(/\.svg$/i, '.nested.svg');
-
-  /* --- DXF → SVG --- */
-  try {
-    const obj = deserialize({ input: fs.readFileSync(dxf, 'utf8') });
-    fs.writeFileSync(svg, serialize({}, obj));
-    centerSvgFile(svg);
-  } catch (e1) {
-    console.warn('JSCAD failed:', e1.message, '→ dxf2svg + Inkscape');
-    try {
-      dxf2svgPy(dxf, svg);
-      centerSvgFile(svg);
-    } catch (e2) {
-      console.error(e2.message);
-      return res.status(500).send('DXF → SVG failed');
-    }
-  }
-
-  /* --- SVG-Nest --- */
-  try {
-    await runNesting(svg, nested);
-    res.download(nested, 'nested.svg', err => {
-      if (err) console.error('Download error:', err);
-      [dxf, svg, nested].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
-    });
-  } catch (err) {
-    console.error('Nesting error:', err);
-    res.status(500).send('Nesting failed');
-  }
-});
-app.post('/nest-dxf', upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).send('No file uploaded.');
-
-  const dxf = req.file.path;
-  const svg = dxf.replace(/\.dxf$/i, '.svg');
-  const nestedSvg = svg.replace(/\.svg$/i, '.nested.svg');
-  const nestedDxf = svg.replace(/\.svg$/i, '.nested.dxf');
-
-  const py = spawnSync('python', ['dxf2svg_ezdxf.py', dxf, svg], { encoding: 'utf8' });
-  if (py.error || py.status !== 0) return res.status(500).send('dxf2svg_ezdxf.py failed');
-
-  try {
-    await runNesting(svg, nestedSvg);
-  } catch (err) {
-    console.error('Nesting error:', err);
-    return res.status(500).send('Nesting failed.');
-  }
-
-  const py2 = spawnSync('python', ['svg2dxf_ezdxf.py', nestedSvg, nestedDxf], { encoding: 'utf8' });
-  if (py2.error || py2.status !== 0) return res.status(500).send('svg2dxf_ezdxf.py failed.');
-
-  res.download(nestedDxf, 'nested.dxf', err => {
-    if (err) console.error('Download error:', err);
-    [dxf, svg, nestedSvg, nestedDxf].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
-  });
-});
-
 /* ==== /convert-only ================================================= */
 app.post('/convert-only', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
@@ -174,18 +83,11 @@ app.post('/convert-only', upload.single('file'), (req, res) => {
   const svg = dxf.replace(/\.dxf$/i, '.svg');
 
   try {
-    const model = deserialize({ input: fs.readFileSync(dxf, 'utf8') });
-    fs.writeFileSync(svg, serialize({}, model));
+    dxf2svgPy(dxf, svg);
     centerSvgFile(svg);
-  } catch (e) {
-    console.warn('JSCAD failed:', e.message, '→ dxf2svg + Inkscape');
-    try {
-      dxf2svgPy(dxf, svg);
-      centerSvgFile(svg);
-    } catch (err) {
-      console.error(err.message);
-      return res.status(500).send('DXF → SVG failed');
-    }
+  } catch (err) {
+    console.error(err.message);
+    return res.status(500).send('DXF → SVG failed');
   }
 
   res.download(svg, 'converted.svg', err => {
@@ -202,5 +104,45 @@ app.use((err, req, res, next) => {
   next();
 });
 
-app.listen(port,
-  () => console.log(`DXF parser server running at http://localhost:${port}`));
+/* ==== Startup: Convert DXF -> SVG, Shift, Nest ====================== */
+app.listen(port, async () => {
+  console.log(`DXF parser server running at http://localhost:${port}`);
+
+  const convertedDir = path.join(__dirname, 'converted');
+  const bin = path.join(__dirname, 'bin.svg');
+  const outSvg = path.join(__dirname, 'nested-output.svg');
+
+  if (!fs.existsSync(convertedDir)) {
+    console.log('⚠️ Folder "converted" does not exist.');
+    return;
+  }
+
+  const files = fs.readdirSync(convertedDir).filter(f => f.endsWith('.dxf'));
+  console.log(`\n📏 Converting ${files.length} DXF files to SVG:`);
+
+  const svgFiles = [];
+
+  for (const f of files) {
+    const dxfPath = path.join(convertedDir, f);
+    const svgPath = dxfPath.replace(/\.dxf$/i, '.svg');
+    try {
+      dxf2svgPy(dxfPath, svgPath);
+      svgFiles.push(svgPath);
+    } catch (err) {
+      console.error(`❌ Failed to convert ${f}: ${err.message}`);
+    }
+  }
+
+  console.log(`\n🔧 Shifting ${svgFiles.length} SVG files:`);
+
+  const shiftedFiles = svgFiles.map(s => {
+    const out = s.replace(/\.svg$/, '_shift.svg');
+    console.log(`⚙️ Shifting bbox: ${path.basename(s)}`);
+    execSync(`python shift_svg_bbox.py "${s}" "${out}"`, { stdio: 'inherit' });
+    return out;
+  });
+
+  console.log('\n🚀 Running SVG nesting...');
+  await runNesting(bin, shiftedFiles, outSvg);
+  console.log(`✅ Nesting finished. Output saved to ${outSvg}`);
+});

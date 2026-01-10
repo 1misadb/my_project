@@ -1,129 +1,233 @@
-const fs        = require('fs');
-const path      = require('path');
-const express   = require('express');
+const fs = require('fs');
+const path = require('path');
+const { pathToFileURL } = require('url');
 const puppeteer = require('puppeteer');
 
-async function runNesting(binSvgPath, partSvgPaths, outputSvg) {
-  const staticServer = express()
-    .use(express.static(path.join(__dirname, 'svgnest')))
-    .listen(0);
-  const url = `http://localhost:${staticServer.address().port}/index.html`;
+function stripOuterSvg(text) {
+  const m = text.match(/<svg[^>]*>([\s\S]*?)<\/svg>/i);
+  return m ? m[1] : text;
+}
 
-  const browser = await puppeteer.launch({ headless: true });
-  const page    = await browser.newPage();
-  page.on('console', m => console.log('[svg-nest]', m.text()));
-  await page.goto(url, { waitUntil: 'networkidle0' });
+function escapeReg(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
-  await page.addStyleTag({ content: `
-    #select{width:100%!important;height:auto!important;margin-top:2em;}
-    #select svg{position:static!important;width:100%!important;height:auto!important;}
-    html,body{margin:0;height:100%;}
-  `});
-
-  const binText   = fs.readFileSync(binSvgPath , 'utf8');
-  const partsText = partSvgPaths.map(p => fs.readFileSync(p,'utf8'));
-
-  await page.evaluate((binSVG, partsSVG) => {
-
-    const wrap = document.getElementById('select');
-    wrap.innerHTML = '';
-
-    /* ---------- BIN ---------- */
-    const bin = window.SvgNest.parsesvg(binSVG);
-    bin.removeAttribute('width');
-    bin.removeAttribute('height');
-
-    if (!bin.hasAttribute('viewBox')) {
-      const w = parseFloat(bin.getAttribute('width'))  || 3000;
-      const h = parseFloat(bin.getAttribute('height')) || 1500;
-      bin.setAttribute('viewBox', `0 0 ${w} ${h}`);
-    }
-
-    wrap.appendChild(bin);
-    window.SvgNest.setbin(bin);
-
-    console.log('✅ BIN bbox:',
-                bin.viewBox.baseVal.width,
-                '×',
-                bin.viewBox.baseVal.height);
-
-    /* ---------- DETAILS ---------- */
-    partsSVG.forEach(txt => {
-      const svgElem = window.SvgNest.parsesvg(txt);
-      svgElem.removeAttribute('width');
-      svgElem.removeAttribute('height');
-
-      // DEBUG
-      console.log('🛠 svgElem.outerHTML:', svgElem.outerHTML);
-
-      /* кладём во временный DOM, чтобы getBBox работал */
-      svgElem.style.visibility = 'hidden';
-      wrap.appendChild(svgElem);
-
-      svgElem.querySelectorAll('path').forEach(path => {
-        const bb = path.getBBox();
-
-        console.log('   ➜ detail bbox:',
-                    bb.width.toFixed(1),'×',bb.height.toFixed(1));
-
-        const g = document.createElementNS(path.namespaceURI,'g');
-        g.setAttribute('class','nestable');
-        g.appendChild(path);         // path внутрь g
-        svgElem.appendChild(g);      // g остался в svgElem
-      });
-    });
-
-    window.SvgNest.config({
-      spacing:         2,
-      rotations:       8,
-      populationSize: 25,
-      mutationRate:   15,
-      exploreConcave: true,
-      useHoles:       true
-    });
-
-  }, binText, partsText);
-
-  /* --- старт поиска раскладки --- */
-  await page.evaluate(() => {
-    const TARGET_ITER = 120;
-    const T_MAX_MS    = 90_000;
-
-    let iterations = 0;
-    window.finished = false;
-
-    const origRender = window.SvgNest.renderSvg;
-    window.SvgNest.renderSvg = (...args) => {
-      iterations++;
-      if (iterations % 10 === 0)
-        console.log(`🔁 Iteration ${iterations}`);
-      origRender(...args);
-      if (iterations >= TARGET_ITER) window.finished = true;
-    };
-
-    document.querySelector('#start').classList.remove('disabled');
-    document.querySelector('#start').click();
-
-    setTimeout(() => {
-      console.log(`⏰ Timeout after ${iterations} iterations`);
-      window.finished = true;
-    }, T_MAX_MS);
+function makeUnique(svg, idx) {
+  const foundIds = [];
+  const foundClasses = [];
+  
+  // Найти id
+  let out = svg.replace(/id="([^"]+)"/g, (_, id) => {
+    foundIds.push(id);
+    return `id="${id}_${idx}"`;
   });
 
-  await page.waitForFunction('window.finished === true', { timeout: 12_000 });
+  // Найти классы
+  out = out.replace(/class="([^"]+)"/g, (_, classes) => {
+    const clsArray = classes.split(/\s+/);
+    clsArray.forEach(cls => foundClasses.push(cls));
+    return `class="${clsArray.map(c => `${c}_${idx}`).join(' ')}"`;
+  });
 
-  const inner = await page.evaluate(() =>
-    document.getElementById('select').innerHTML
-  );
+  // Заменить все найденные id
+  for (const id of foundIds) {
+    const safe = escapeReg(id);
+    const target = `${id}_${idx}`;
 
-  fs.writeFileSync(
-    outputSvg,
-    `<svg xmlns="http://www.w3.org/2000/svg">${inner}</svg>`
-  );
-  console.log('✅ nested SVG saved →', outputSvg);
+    const replacements = [
+      [`url\\(#${safe}\\)`, `url(#${target})`],
+      [`href="#${safe}"`, `href="#${target}"`],
+      [`xlink:href="#${safe}"`, `xlink:href="#${target}"`],
+      [`#${safe}\\b`, `#${target}`],
+      [`begin="${safe}\\.`, `begin="${target}.`],
+      [`from="#${safe}"`, `from="#${target}"`],
+      [`to="#${safe}"`, `to="#${target}"`],
+      [`by="#${safe}"`, `by="#${target}"`],
+      [`filter="url\\(#${safe}\\)"`, `filter="url(#${target})"`],
+      [`mask="url\\(#${safe}\\)"`, `mask="url(#${target})"`],
+      [`clip-path="url\\(#${safe}\\)"`, `clip-path="url(#${target})"`],
+      [`marker-start="url\\(#${safe}\\)"`, `marker-start="url(#${target})"`],
+      [`marker-mid="url\\(#${safe}\\)"`, `marker-mid="url(#${target})"`],
+      [`marker-end="url\\(#${safe}\\)"`, `marker-end="url(#${target})"`],
+      [`fill="url\\(#${safe}\\)([^"]*)"`, `fill="url(#${target})$1"`],
+      [`stroke="url\\(#${safe}\\)([^"]*)"`, `stroke="url(#${target})$1"`],
+      [`aria-labelledby="${safe}"`, `aria-labelledby="${target}"`],
+      [`aria-describedby="${safe}"`, `aria-describedby="${target}"`],
+    ];
 
-  await browser.close();
-  staticServer.close();
+    for (const [pattern, replaceWith] of replacements) {
+      out = out.replace(new RegExp(pattern, 'g'), replaceWith);
+    }
+
+    // Заменить в <style>
+    out = out.replace(/<style[^>]*>([\s\S]*?)<\/style>/g, (match, css) => {
+      let updatedCss = css.replace(new RegExp(`#${safe}\\b`, 'g'), `#${target}`);
+      updatedCss = updatedCss.replace(new RegExp(`url\\(#${safe}\\)`, 'g'), `url(#${target})`);
+      return `<style>${updatedCss}</style>`;
+    });
+  }
+
+  // Заменить классы в <style>
+  for (const id of foundIds) {
+    const safe = escapeReg(id);
+    const target = `${id}_${idx}`;
+    out = out.replace(new RegExp(`style="([^"]*?)url\\(#${safe}\\)([^"]*?)"`, 'g'),
+      (_, pre, post) => `style="${pre}url(#${target})${post}"`);
+  }
+
+  return out;
+}
+
+
+async function runNesting(binSvgPath, partSvgArray, outputSvg, multiplyCounts) {
+  let browser;
+
+  try {
+    console.log('🏁 Starting SVG nesting...');
+    browser = await puppeteer.launch({
+      protocolTimeout: 3600000, // 1 hour
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--allow-file-access-from-files',
+        '--disable-web-security',
+        '--disable-features=site-per-process',
+        '--disable-features=IsolateOrigins',
+      ],
+    });
+
+    const page = await browser.newPage();
+    page.on('console', m => console.log('[svg-nest]', m.text()));
+    page.on('pageerror', err => console.error('[svg-nest] [pageerror]', err));
+
+    const indexHtmlUrl = pathToFileURL(path.join(__dirname, 'svgnest', 'index.html')).href;
+    console.log('🔗 Loading index.html from:', indexHtmlUrl);
+    await page.goto(indexHtmlUrl, { waitUntil: 'load' });
+    console.log('[svg-nest] ✅ index.html loaded successfully');
+
+    // Prepare bin
+    const binContent = stripOuterSvg(fs.readFileSync(binSvgPath, 'utf8'));
+
+    // Prepare all parts
+    const partsContent = [];
+    for (let i = 0; i < partSvgArray.length; i++) {
+      const partPath = partSvgArray[i];
+      const count = multiplyCounts[i];
+
+      let partContent = fs.readFileSync(partPath, 'utf8');
+      partContent = partContent.replace(/viewBox="([^"]+)"/, (match, p1) => {
+        return `viewBox="${p1.replace(/,/g, ' ')}"`;
+      });
+
+      const stripped = stripOuterSvg(partContent);
+
+      for (let n = 0; n < count; n++) {
+        const copy = makeUnique(stripped, `${i}_${n}`);
+        const wrapped = `<g id="part_${i}_${n}">${copy}</g>`;
+        partsContent.push(wrapped);
+      }
+    }
+
+
+    const allSvg = `<svg xmlns="http://www.w3.org/2000/svg">${binContent}${partsContent.join('')}</svg>`;
+    console.log('[svg-nest] SVG string length:', allSvg.length);
+
+    // Evaluate in browser
+    await page.evaluate((svgString) => {
+      console.log('[svg-nest] 📝 evaluate entered');
+
+      if (!window.SvgNest) throw new Error('SvgNest not found');
+
+      const wrap = document.getElementById('select');
+      if (!wrap) throw new Error('#select div not found');
+
+      wrap.innerHTML = '';
+      const root = window.SvgNest.parsesvg(svgString);
+      if (!root || !root.children.length) throw new Error('SVG has no children');
+      wrap.appendChild(root);
+      console.log('[svg-nest] ✅ SVG appended to DOM');
+
+      const bin = root.firstElementChild;
+      if (!bin) throw new Error('Bin not found');
+      window.SvgNest.setbin(bin);
+
+      window.SvgNest.config({
+        spacing: 5,
+        rotations: 8,
+        populationSize: 50,
+        mutationRate: 45,
+        exploreConcave: true,
+        useHoles: true,
+        curveTolerance: 0.009999
+      });
+
+      console.log('[svg-nest] ✅ SvgNest configured');
+    }, allSvg);
+
+    // Start nesting
+    await page.evaluate(() => {
+      console.log('[svg-nest] 🚀 Starting nesting algorithm');
+      const TARGET_ITER = 50;
+      const T_MAX_MS = 300000;
+      let iterations = 0;
+      window.finished = false;
+
+      const target = document.getElementById('select');
+      window.SvgNest.start(() => {}, svglist => {
+        iterations++;
+        if (iterations % 10 === 0) console.log(`🔁 Iteration ${iterations}`);
+        if (svglist && svglist.length) {
+          target.innerHTML = '';
+          svglist.forEach(s => target.appendChild(s));
+        }
+        if (iterations >= TARGET_ITER) window.finished = true;
+      });
+
+      setTimeout(() => {
+        console.log(`⏰ Timeout after ${iterations} iterations`);
+        window.finished = true;
+      }, T_MAX_MS);
+    });
+
+    await page.waitForFunction('window.finished === true', { timeout: 3600000 });
+    console.log('[svg-nest] ✅ Nesting finished');
+
+    const inner = await page.evaluate(() => document.getElementById('select').innerHTML);
+    fs.writeFileSync(outputSvg, `<svg xmlns="http://www.w3.org/2000/svg">${inner}</svg>`);
+    console.log('✅ nested SVG saved →', outputSvg);
+
+  } catch (err) {
+    console.error('[svg-nest] ❌ Fatal error:', err);
+  } finally {
+    if (browser) await browser.close();
+    console.log('👋 Browser closed');
+  }
+}
+
+// CLI mode
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  if (args.length < 4) {
+    console.log('Usage: node nesting.js bin.svg part1.svg part2.svg ... output.svg count1 count2 ...');
+    process.exit(1);
+  }
+
+  const binSvg = args.shift();
+  const counts = args.splice(-args.length / 2).map(x => parseInt(x,10));
+  const outputSvg = args.pop();
+  const partSvgs = args;
+
+  console.log(`🚀 Running nesting
+  Bin: ${binSvg}
+  Parts: ${partSvgs.join(', ')}
+  Output: ${outputSvg}
+  Copies: ${counts.join(', ')}
+  `);
+
+  runNesting(binSvg, partSvgs, outputSvg, counts);
 }
 
 module.exports = { runNesting };

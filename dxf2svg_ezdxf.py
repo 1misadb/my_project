@@ -25,7 +25,7 @@ def poly_points(e):
         err_counter[f"poly_points:{ex}"] += 1
     return []
 
-def spline_points(e, samples=120):
+def spline_points(e, samples=10000):
     """SPLINE all fallback, 2D-only"""
     try:
         if hasattr(e, "approximate") and callable(e.approximate):
@@ -72,7 +72,7 @@ def ent_bbox(e, sf):
             xs,ys = [x*sf for x,_ in pts],[y*sf for _,y in pts]
             return bbox_xy(xs,ys)
         if t == 'SPLINE':
-            pts = spline_points(e, 120)
+            pts = spline_points(e, 10000)
             xs,ys = [x*sf for x,_ in pts],[y*sf for _,y in pts]
             return bbox_xy(xs,ys)
     except Exception as ex:
@@ -135,9 +135,12 @@ def convert(infile, outfile, sf=None):
             if t=='LINE':
                 s,e1=e.dxf.start,e.dxf.end
                 dwg.add(dwg.line((s.x*sf,-s.y*sf),(e1.x*sf,-e1.y*sf),stroke='black'))
-            elif t=='CIRCLE':
+            elif t == 'CIRCLE':
                 c,r=e.dxf.center,e.dxf.radius*sf
-                dwg.add(dwg.circle((c.x*sf,-c.y*sf),r,stroke='black',fill='none'))
+                d = f"M {c.x*sf+r} {-c.y*sf} " \
+                    f"A {r} {r} 0 1 0 {c.x*sf-r} {-c.y*sf} " \
+                    f"A {r} {r} 0 1 0 {c.x*sf+r} {-c.y*sf} Z"
+                dwg.add(dwg.path(d=d, stroke='black', fill='none'))
             elif t=='ARC':
                 c,r=e.dxf.center,e.dxf.radius*sf
                 sa,ea=map(math.radians,(e.dxf.start_angle,e.dxf.end_angle))
@@ -152,7 +155,7 @@ def convert(infile, outfile, sf=None):
                     node = dwg.polygon if getattr(e,'is_closed',False) or getattr(e,'closed',False) else dwg.polyline
                     dwg.add(node(pts,stroke='black',fill='none'))
             elif t=='SPLINE':
-                pts=[(x*sf,-y*sf) for x,y in spline_points(e,120)]
+                pts=[(x*sf,-y*sf) for x,y in spline_points(e,10000)]
                 if pts:
                     dwg.add(dwg.polyline(pts,stroke='black',fill='none'))
         except Exception as ex:
